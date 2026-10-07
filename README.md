@@ -22,6 +22,14 @@ Health check:
 GET /health
 ```
 
+## Docker
+
+From the parent folder that contains both `wms-backend` and `wms-frontend`:
+
+```bash
+docker compose up --build
+```
+
 API:
 
 ```text
