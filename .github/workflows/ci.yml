@@ -1,0 +1,93 @@
+name: Backend CI and Docker
+
+on:
+  push:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  integration:
+    name: Docker Compose and Cypress
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout backend
+        uses: actions/checkout@v6
+        with:
+          path: wms-backend
+
+      - name: Checkout frontend
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ github.repository_owner }}/wms-frontend
+          path: wms-frontend
+          token: ${{ secrets.CROSS_REPO_TOKEN || github.token }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: wms-frontend/package-lock.json
+
+      - name: Validate backend JavaScript
+        working-directory: wms-backend
+        run: npm ci && npm run lint
+
+      - name: Build and start the complete stack
+        run: docker compose -f wms-backend/infra/docker-compose.yml up -d --build --wait
+
+      - name: Install frontend dependencies
+        working-directory: wms-frontend
+        run: npm ci
+
+      - name: Run Cypress
+        working-directory: wms-frontend
+        run: npx cypress run --browser chrome
+        env:
+          CYPRESS_apiUrl: http://localhost:4000
+
+      - name: Show container logs
+        if: always()
+        run: docker compose -f wms-backend/infra/docker-compose.yml logs --no-color
+
+      - name: Stop the stack
+        if: always()
+        run: docker compose -f wms-backend/infra/docker-compose.yml down -v
+
+  image:
+    name: Build and publish backend image
+    needs: integration
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout backend
+        uses: actions/checkout@v6
+
+      - name: Set lowercase image name
+        id: image
+        shell: bash
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and optionally publish backend image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          tags: |
+            ${{ steps.image.outputs.name }}:latest
+            ${{ steps.image.outputs.name }}:${{ github.sha }}
