@@ -64,6 +64,37 @@ variable "database_storage_size" {
   default     = "1Gi"
 }
 
+variable "create_gp3_storage_class" {
+  description = "Create the AWS EBS CSI gp3 StorageClass used by the database PVC."
+  type        = bool
+  default     = false
+}
+
+variable "database_storage_class_name" {
+  description = "StorageClass assigned to the database PVC. Null uses the cluster default."
+  type        = string
+  default     = null
+  nullable    = true
+}
+
+variable "frontend_service_type" {
+  description = "Kubernetes Service type used to expose the frontend."
+  type        = string
+  default     = "NodePort"
+
+  validation {
+    condition     = contains(["NodePort", "LoadBalancer"], var.frontend_service_type)
+    error_message = "frontend_service_type must be NodePort or LoadBalancer."
+  }
+}
+
+variable "frontend_load_balancer_source_ranges" {
+  description = "Optional CIDR ranges allowed to reach a LoadBalancer frontend."
+  type        = list(string)
+  default     = null
+  nullable    = true
+}
+
 variable "frontend_node_port" {
   description = "NodePort used to expose the frontend from Minikube."
   type        = number
@@ -83,5 +114,16 @@ variable "prometheus_node_port" {
   validation {
     condition     = var.prometheus_node_port >= 30000 && var.prometheus_node_port <= 32767
     error_message = "prometheus_node_port must be in the Kubernetes NodePort range (30000-32767)."
+  }
+}
+
+variable "prometheus_service_type" {
+  description = "Kubernetes Service type used for Prometheus."
+  type        = string
+  default     = "NodePort"
+
+  validation {
+    condition     = contains(["ClusterIP", "NodePort"], var.prometheus_service_type)
+    error_message = "prometheus_service_type must be ClusterIP or NodePort."
   }
 }

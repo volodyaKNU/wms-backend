@@ -1,0 +1,14 @@
+# Copy to terraform.aws.tfvars (ignored) after the EKS cluster and ECR
+# repositories exist.
+kube_context                        = "arn:aws:eks:eu-north-1:ACCOUNT_ID:cluster/wms-lab"
+namespace                           = "wms"
+backend_image                       = "ACCOUNT_ID.dkr.ecr.eu-north-1.amazonaws.com/wms-backend:latest"
+frontend_image                      = "ACCOUNT_ID.dkr.ecr.eu-north-1.amazonaws.com/wms-frontend:latest"
+postgres_image                      = "postgres:16-alpine"
+prometheus_image                    = "prom/prometheus:v3.5.0"
+create_gp3_storage_class            = true
+database_storage_class_name         = "wms-gp3"
+database_storage_size               = "5Gi"
+frontend_service_type               = "LoadBalancer"
+frontend_load_balancer_source_ranges = ["YOUR_PUBLIC_IP/32"]
+prometheus_service_type             = "ClusterIP"

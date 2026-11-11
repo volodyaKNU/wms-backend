@@ -104,6 +104,27 @@ resource "kubernetes_service_v1" "database" {
   }
 }
 
+resource "kubernetes_storage_class_v1" "gp3" {
+  count = var.create_gp3_storage_class ? 1 : 0
+
+  metadata {
+    name = "wms-gp3"
+    labels = merge(local.common_labels, {
+      "app.kubernetes.io/component" = "storage"
+    })
+  }
+
+  storage_provisioner    = "ebs.csi.aws.com"
+  reclaim_policy         = "Delete"
+  volume_binding_mode    = "WaitForFirstConsumer"
+  allow_volume_expansion = true
+
+  parameters = {
+    type      = "gp3"
+    encrypted = "true"
+  }
+}
+
 resource "kubernetes_persistent_volume_claim_v1" "database" {
   metadata {
     name      = "wms-db-data"
@@ -112,7 +133,8 @@ resource "kubernetes_persistent_volume_claim_v1" "database" {
   }
 
   spec {
-    access_modes = ["ReadWriteOnce"]
+    access_modes       = ["ReadWriteOnce"]
+    storage_class_name = var.database_storage_class_name
 
     resources {
       requests = {
@@ -122,6 +144,8 @@ resource "kubernetes_persistent_volume_claim_v1" "database" {
   }
 
   wait_until_bound = false
+
+  depends_on = [kubernetes_storage_class_v1.gp3]
 }
 
 resource "kubernetes_stateful_set_v1" "database" {
@@ -185,6 +209,11 @@ resource "kubernetes_stateful_set_v1" "database" {
                 key  = "POSTGRES_PASSWORD"
               }
             }
+          }
+
+          env {
+            name  = "PGDATA"
+            value = "/var/lib/postgresql/data/pgdata"
           }
 
           readiness_probe {
@@ -425,7 +454,7 @@ resource "kubernetes_service_v1" "prometheus" {
   }
 
   spec {
-    type = "NodePort"
+    type = var.prometheus_service_type
     selector = {
       app = "wms-prometheus"
     }
@@ -434,7 +463,7 @@ resource "kubernetes_service_v1" "prometheus" {
       name        = "http"
       port        = 9090
       target_port = "http"
-      node_port   = var.prometheus_node_port
+      node_port   = var.prometheus_service_type == "NodePort" ? var.prometheus_node_port : null
     }
   }
 }
@@ -543,7 +572,8 @@ resource "kubernetes_service_v1" "frontend" {
   }
 
   spec {
-    type = "NodePort"
+    type                        = var.frontend_service_type
+    load_balancer_source_ranges = var.frontend_service_type == "LoadBalancer" ? var.frontend_load_balancer_source_ranges : null
     selector = {
       app = "wms-frontend"
     }
@@ -552,7 +582,7 @@ resource "kubernetes_service_v1" "frontend" {
       name        = "http"
       port        = 80
       target_port = "http"
-      node_port   = var.frontend_node_port
+      node_port   = var.frontend_service_type == "NodePort" ? var.frontend_node_port : null
     }
   }
 }

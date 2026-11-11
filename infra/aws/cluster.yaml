@@ -1,0 +1,45 @@
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+
+metadata:
+  name: wms-lab
+  region: eu-north-1
+  version: "1.37"
+  tags:
+    project: wms-lab
+    environment: lab
+    managed-by: eksctl
+    expires-after: "2026-11-14"
+
+autoModeConfig:
+  enabled: false
+
+vpc:
+  clusterEndpoints:
+    publicAccess: true
+    privateAccess: true
+  nat:
+    gateway: Single
+
+managedNodeGroups:
+  - name: wms-workers-ft
+    instanceType: c7i-flex.large
+    minSize: 1
+    desiredCapacity: 1
+    maxSize: 1
+    volumeSize: 20
+    volumeType: gp3
+    privateNetworking: true
+    # The lab account's organization policy blocks IAM OIDC providers, so the
+    # EBS CSI controller uses this short-lived node role instead of IRSA.
+    disablePodIMDS: false
+    iam:
+      withAddonPolicies:
+        ebs: true
+    labels:
+      workload: wms
+    tags:
+      project: wms-lab
+      environment: lab
+      managed-by: eksctl
+      expires-after: "2026-11-14"
