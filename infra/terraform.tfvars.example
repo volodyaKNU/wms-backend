@@ -1,0 +1,7 @@
+# Copy this file to terraform.tfvars only for local use. terraform.tfvars is ignored by Git.
+postgres_password = "replace-with-a-local-password"
+
+# Override these values only when you are not using the local Minikube images.
+# backend_image  = "ghcr.io/your-user/wms-backend:latest"
+# frontend_image = "ghcr.io/your-user/wms-frontend:latest"
+# prometheus_image = "prom/prometheus:v3.5.0"

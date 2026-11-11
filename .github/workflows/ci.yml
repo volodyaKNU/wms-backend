@@ -9,6 +9,32 @@ permissions:
   contents: read
 
 jobs:
+  terraform:
+    name: Terraform format and validation
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: infra
+
+    steps:
+      - name: Checkout backend
+        uses: actions/checkout@v6
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: "1.16.7"
+
+      - name: Check Terraform formatting
+        run: terraform fmt -check -recursive
+
+      - name: Initialize Terraform
+        run: terraform init -backend=false
+
+      - name: Validate Terraform
+        run: terraform validate
+
   integration:
     name: Docker Compose and Cypress
     runs-on: ubuntu-latest
@@ -29,7 +55,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
           cache-dependency-path: wms-frontend/package-lock.json
 
@@ -60,7 +86,7 @@ jobs:
 
   image:
     name: Build and publish backend image
-    needs: integration
+    needs: [terraform, integration]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -91,3 +117,31 @@ jobs:
           tags: |
             ${{ steps.image.outputs.name }}:latest
             ${{ steps.image.outputs.name }}:${{ github.sha }}
+
+  deploy:
+    name: Update backend in Minikube
+    needs: image
+    if: >-
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      vars.ENABLE_MINIKUBE_CD == 'true'
+    runs-on: [self-hosted, wms-minikube]
+    environment: minikube
+    permissions:
+      contents: read
+      packages: read
+
+    steps:
+      - name: Set lowercase image name
+        id: image
+        shell: bash
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Update backend Deployment
+        run: >-
+          kubectl set image deployment/wms-backend
+          backend=${{ steps.image.outputs.name }}:${{ github.sha }}
+          --namespace wms
+
+      - name: Verify backend rollout
+        run: kubectl rollout status deployment/wms-backend --namespace wms --timeout=180s

@@ -9,6 +9,7 @@
     "db:schema": "psql \"$DATABASE_URL\" -f infra/schema.sql"
   },
   "dependencies": {
+    "@prometheus-io/client": "^0.16.1",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
