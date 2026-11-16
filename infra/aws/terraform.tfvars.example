@@ -12,4 +12,4 @@ database_storage_size               = "5Gi"
 frontend_service_type               = "LoadBalancer"
 # null = public (0.0.0.0/0); or restrict, e.g. ["YOUR_PUBLIC_IP/32"]
 frontend_load_balancer_source_ranges = null
-prometheus_service_type             = "ClusterIP"
+prometheus_service_type             = "LoadBalancer" # public Prometheus UI (test stand)

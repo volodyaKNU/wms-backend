@@ -192,3 +192,15 @@ No credentials are stored in the repository: Docker Compose requires
 `POSTGRES_PASSWORD` (CI generates a throwaway one per run), Terraform takes
 `TF_VAR_postgres_password`, and production values live only in GitHub Actions
 secrets and the `wms-db-secret` Kubernetes Secret.
+
+### Public endpoints on the AWS test stand
+
+Both Services use an AWS LoadBalancer with no source-IP restriction
+(`frontend_load_balancer_source_ranges = null`,
+`prometheus_service_type = "LoadBalancer"`):
+
+- WMS UI: `http://<frontend-lb-hostname>/` (`terraform output frontend_load_balancer_hostname`)
+- Prometheus UI: `http://<prometheus-lb-hostname>:9090/` (`terraform output prometheus_load_balancer_hostname`)
+
+Prometheus has no authentication, so this setup is meant only for the
+temporary lab environment.

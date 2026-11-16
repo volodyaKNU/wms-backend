@@ -118,12 +118,12 @@ variable "prometheus_node_port" {
 }
 
 variable "prometheus_service_type" {
-  description = "Kubernetes Service type used for Prometheus."
+  description = "Kubernetes Service type used for Prometheus (LoadBalancer exposes the UI publicly)."
   type        = string
   default     = "NodePort"
 
   validation {
-    condition     = contains(["ClusterIP", "NodePort"], var.prometheus_service_type)
-    error_message = "prometheus_service_type must be ClusterIP or NodePort."
+    condition     = contains(["ClusterIP", "NodePort", "LoadBalancer"], var.prometheus_service_type)
+    error_message = "prometheus_service_type must be ClusterIP, NodePort or LoadBalancer."
   }
 }

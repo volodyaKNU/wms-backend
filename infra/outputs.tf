@@ -37,3 +37,8 @@ output "open_prometheus_command" {
   description = "Command that opens Prometheus in Minikube."
   value       = var.prometheus_service_type == "NodePort" ? "minikube service ${kubernetes_service_v1.prometheus.metadata[0].name} -n ${kubernetes_namespace_v1.wms.metadata[0].name}" : "kubectl port-forward service/${kubernetes_service_v1.prometheus.metadata[0].name} 9090:9090 -n ${kubernetes_namespace_v1.wms.metadata[0].name}"
 }
+
+output "prometheus_load_balancer_hostname" {
+  description = "Public AWS load balancer hostname when Prometheus uses LoadBalancer."
+  value       = try(kubernetes_service_v1.prometheus.status[0].load_balancer[0].ingress[0].hostname, null)
+}
