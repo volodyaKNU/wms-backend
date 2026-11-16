@@ -2,3 +2,13 @@ node_modules
 .env
 .git
 npm-debug.log*
+
+# Infrastructure code and state never belong in the application image
+infra/terraform
+infra/k8s
+infra/aws
+**/.terraform
+**/*.tfstate
+**/*.tfstate.*
+**/*.tfplan
+**/*.tfvars

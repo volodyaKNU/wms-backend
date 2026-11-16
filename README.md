@@ -95,34 +95,78 @@ To reapply manifests without rebuilding images, use
 `kubectl apply -k infra/k8s`. Database data remains in the
 `wms-db-data` PersistentVolumeClaim when pods restart.
 
-## Terraform
+## Terraform (AWS infrastructure as code)
 
-The Terraform configuration in `infra` reproduces the same Namespace,
-ConfigMaps, Secret, Services, Deployments, PostgreSQL StatefulSet, and
-PersistentVolumeClaim. Build the local images with the Kubernetes deployment
-script first, then apply the infrastructure from `infra`:
+The whole AWS environment, from the VPC to the application, is described in
+`infra/terraform` as three layers. Each layer has its own remote state in S3,
+so a change to the application never touches the network or the cluster.
 
-```powershell
-$env:TF_VAR_postgres_password = 'choose-a-local-password'
-terraform init
-terraform fmt -check -recursive
-terraform validate
-terraform plan -out=wms.tfplan
-terraform apply wms.tfplan
+```text
+infra/terraform/
+├── bootstrap/  S3 state bucket (versioned, encrypted, TLS-only, S3 native locking)
+│               + IAM user wms-terraform-ci used by GitHub Actions
+├── aws/        VPC (3 AZ, public + private subnets, single NAT gateway)
+│               EKS cluster wms-eks + managed node group (c7i-flex.large)
+│               add-ons: vpc-cni, kube-proxy, coredns, eks-pod-identity-agent,
+│                        aws-ebs-csi-driver (Pod Identity), metrics-server
+│               EKS access entries, ECR repositories, IAM user wms-github-deployer
+└── k8s/        namespace wms, ConfigMaps, Secret, gp3 StorageClass, PostgreSQL
+                StatefulSet + PVC, backend, frontend, Prometheus, LoadBalancers
 ```
 
-The password is a sensitive input and must be supplied through an environment
-variable or an ignored `terraform.tfvars` file. Do not commit real credentials.
-The CI workflow runs `terraform fmt -check -recursive` and `terraform validate`
-for every push and pull request.
+| Layer | State key | Applied by |
+|-------|-----------|------------|
+| bootstrap | `bootstrap/terraform.tfstate` | locally, once (it creates the bucket and the CI user) |
+| aws | `aws/terraform.tfstate` | GitHub Actions on `main`, or locally |
+| k8s | `k8s/terraform.tfstate` | GitHub Actions on `main`, or locally |
 
-After apply completes, inspect the resources and open the frontend:
+The k8s layer reads the cluster endpoint and the ECR URLs from the aws layer
+state (`terraform_remote_state`) and authenticates with `aws eks get-token`, so
+no kubeconfig is required.
 
-```powershell
-kubectl get pods,services,pvc -n wms
-minikube service wms-frontend-service -n wms
-minikube service wms-prometheus-service -n wms
+Account-specific constraints:
+
+- The AWS Organizations SCP denies IAM OIDC providers. IRSA is therefore
+  disabled (`enable_irsa = false`); the EBS CSI driver gets its permissions via
+  **EKS Pod Identity**, and GitHub Actions uses IAM access keys instead of OIDC.
+- Cluster admins are listed explicitly (`cluster_admin_role_arns` plus the
+  Terraform CI user) instead of "whoever ran Terraform", so local and CI
+  applies do not overwrite each other's access entries.
+- The node type must be on the account's Free Tier allow-list.
+
+### Running Terraform locally
+
+```bash
+aws login                                     # any admin session for the account
+export TF_VAR_postgres_password='...'         # same value as the WMS_POSTGRES_PASSWORD secret
+
+terraform -chdir=infra/terraform/aws init
+terraform -chdir=infra/terraform/aws plan -out=tfplan
+terraform -chdir=infra/terraform/aws apply tfplan
+
+terraform -chdir=infra/terraform/k8s init
+terraform -chdir=infra/terraform/k8s plan -out=tfplan
+terraform -chdir=infra/terraform/k8s apply tfplan
+
+terraform -chdir=infra/terraform/k8s output     # frontend_url, prometheus_url
+aws eks update-kubeconfig --region eu-north-1 --name wms-eks --alias wms-eks
 ```
+
+Creating the environment from scratch takes about 20 minutes: bootstrap (once),
+then aws, then k8s. Destroy in reverse order: `k8s` first, so that Kubernetes
+deletes the load balancers and the EBS volume, then `aws`.
+
+### Terraform in GitHub Actions (`.github/workflows/terraform.yml`)
+
+Triggered by changes under `infra/terraform/**`:
+
+- **pull request**: `terraform plan` for aws and k8s; the plan is posted as a
+  PR comment and in the job summary;
+- **push to `main`**: `plan` + `apply` for aws, then for k8s (environment
+  `terraform-lab`, add required reviewers there to gate applies).
+
+`Backend CI/CD` additionally runs `terraform fmt -check` and `validate` for all
+three layers on every push.
 
 ## CI and container image
 
@@ -153,7 +197,7 @@ variable.
 Every push to `main` in `wms-backend` or `wms-frontend` runs the full pipeline:
 tests → image build → push to Amazon ECR (`<account>.dkr.ecr.eu-north-1.amazonaws.com/wms-<app>:<commit-sha>`,
 also mirrored to GHCR) → the `deploy-eks` job updates the Deployment in the
-`wms-lab` cluster.
+`wms-eks` cluster.
 
 The `deploy-eks` job:
 
@@ -177,15 +221,16 @@ rolled out by CI.
 | Kind | Name | Repositories | Purpose |
 |------|------|--------------|---------|
 | Secret | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | both | IAM user `wms-github-deployer` |
-| Secret | `WMS_POSTGRES_PASSWORD` | backend | value of the `wms-db-secret` Kubernetes Secret |
+| Secret | `WMS_POSTGRES_PASSWORD` | backend | value of the `wms-db-secret` Kubernetes Secret (CD + Terraform) |
+| Secret | `TF_AWS_ACCESS_KEY_ID`, `TF_AWS_SECRET_ACCESS_KEY` | backend | IAM user `wms-terraform-ci` (Terraform plan/apply) |
 | Secret | `AWS_ROLE_ARN` (optional) | both | use GitHub OIDC instead of access keys |
 | Variable | `ENABLE_EKS_CD=true` | both | enables the `deploy-eks` job |
-| Variable | `AWS_REGION`, `EKS_CLUSTER_NAME` (optional) | both | defaults: `eu-north-1`, `wms-lab` |
+| Variable | `AWS_REGION`, `EKS_CLUSTER_NAME` (optional) | both | defaults: `eu-north-1`, `wms-eks` |
 
 The lab account's AWS Organizations SCP denies IAM OIDC providers, so GitHub
 OIDC cannot be used here and the pipeline falls back to access keys. The
 `wms-github-deployer` IAM user is limited to pushing the two WMS ECR
-repositories and `eks:DescribeCluster` on `wms-lab`. Inside Kubernetes its EKS
+repositories and `eks:DescribeCluster` on `wms-eks` (managed in `infra/terraform/aws/iam-ci.tf`). Inside Kubernetes its EKS
 access entry has `AmazonEKSEditPolicy` scoped to the `wms` namespace only.
 
 No credentials are stored in the repository: Docker Compose requires
@@ -199,8 +244,8 @@ Both Services use an AWS LoadBalancer with no source-IP restriction
 (`frontend_load_balancer_source_ranges = null`,
 `prometheus_service_type = "LoadBalancer"`):
 
-- WMS UI: `http://<frontend-lb-hostname>/` (`terraform output frontend_load_balancer_hostname`)
-- Prometheus UI: `http://<prometheus-lb-hostname>:9090/` (`terraform output prometheus_load_balancer_hostname`)
+- WMS UI: `http://<frontend-lb-hostname>/` (`terraform -chdir=infra/terraform/k8s output frontend_url`)
+- Prometheus UI: `http://<prometheus-lb-hostname>:9090/` (`terraform -chdir=infra/terraform/k8s output prometheus_url`)
 
 Prometheus has no authentication, so this setup is meant only for the
 temporary lab environment.

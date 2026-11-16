@@ -1,0 +1,149 @@
+name: Terraform
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - infra/terraform/**
+      - infra/schema.sql
+      - .github/workflows/terraform.yml
+  push:
+    branches: [main]
+    paths:
+      - infra/terraform/**
+      - infra/schema.sql
+      - .github/workflows/terraform.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Never run two Terraform jobs against the same state at once.
+concurrency:
+  group: terraform-wms-lab
+  cancel-in-progress: false
+
+env:
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+  TF_VERSION: "1.16.7"
+  AWS_REGION: eu-north-1
+
+jobs:
+  plan:
+    name: Plan (aws + k8s)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          aws-access-key-id: ${{ secrets.TF_AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.TF_AWS_SECRET_ACCESS_KEY }}
+
+      - name: Terraform plan
+        id: plan
+        shell: bash
+        env:
+          TF_VAR_postgres_password: ${{ secrets.WMS_POSTGRES_PASSWORD }}
+        run: |
+          set -o pipefail
+          report="$RUNNER_TEMP/plan.md"
+          echo "## Terraform plan for \`${GITHUB_SHA::7}\`" > "$report"
+          status=0
+          for layer in aws k8s; do
+            dir="infra/terraform/${layer}"
+            terraform -chdir="$dir" init -no-color
+            if terraform -chdir="$dir" plan -no-color -lock-timeout=5m -detailed-exitcode -out=tfplan > "$RUNNER_TEMP/${layer}.txt" 2>&1; then
+              code=0
+            else
+              code=$?
+            fi
+            cat "$RUNNER_TEMP/${layer}.txt"
+            case "$code" in
+              0) summary="no changes" ;;
+              2) summary="$(grep -E '^Plan:' "$RUNNER_TEMP/${layer}.txt" || echo 'changes')" ;;
+              *) summary="FAILED"; status=1 ;;
+            esac
+            {
+              echo ""
+              echo "<details><summary><b>${layer}</b>: ${summary}</summary>"
+              echo ""
+              echo '```'
+              tail -c 25000 "$RUNNER_TEMP/${layer}.txt"
+              echo '```'
+              echo "</details>"
+            } >> "$report"
+          done
+          cat "$report" >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+
+      - name: Comment the plan on the pull request
+        if: always() && steps.plan.outcome != 'skipped'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh pr comment "${{ github.event.pull_request.number }}" --repo "$GITHUB_REPOSITORY" --body-file "$RUNNER_TEMP/plan.md"
+
+  apply:
+    name: Apply (aws -> k8s)
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: terraform-lab
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          aws-access-key-id: ${{ secrets.TF_AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.TF_AWS_SECRET_ACCESS_KEY }}
+
+      # The k8s layer reads the cluster endpoint from the aws layer state, so
+      # the layers are applied strictly in this order.
+      - name: Apply aws layer
+        working-directory: infra/terraform/aws
+        run: |
+          terraform init -no-color
+          terraform plan -no-color -lock-timeout=5m -out=tfplan
+          terraform apply -no-color -lock-timeout=5m tfplan
+
+      - name: Apply k8s layer
+        working-directory: infra/terraform/k8s
+        env:
+          TF_VAR_postgres_password: ${{ secrets.WMS_POSTGRES_PASSWORD }}
+        run: |
+          terraform init -no-color
+          terraform plan -no-color -lock-timeout=5m -out=tfplan
+          terraform apply -no-color -lock-timeout=5m tfplan
+
+      - name: Publish endpoints
+        working-directory: infra/terraform/k8s
+        run: |
+          {
+            echo "## WMS endpoints"
+            echo "- UI: $(terraform output -raw frontend_url)"
+            echo "- Prometheus: $(terraform output -raw prometheus_url)"
+          } >> "$GITHUB_STEP_SUMMARY"

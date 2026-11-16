@@ -3,6 +3,11 @@ locals {
     "app.kubernetes.io/part-of"    = "wms"
     "app.kubernetes.io/managed-by" = "terraform"
   }
+
+  # First rollout uses :latest from ECR; afterwards CI pins the commit-SHA tag
+  # (the Deployments ignore image changes, see lifecycle blocks below).
+  backend_image  = coalesce(var.backend_image, "${local.aws.ecr_repository_urls["wms-backend"]}:latest")
+  frontend_image = coalesce(var.frontend_image, "${local.aws.ecr_repository_urls["wms-frontend"]}:latest")
 }
 
 resource "kubernetes_namespace_v1" "wms" {
@@ -33,7 +38,7 @@ resource "kubernetes_config_map_v1" "database_init" {
   }
 
   data = {
-    "01-schema.sql" = file("${path.module}/schema.sql")
+    "01-schema.sql" = file("${path.module}/../../schema.sql")
   }
 }
 
@@ -322,7 +327,7 @@ resource "kubernetes_deployment_v1" "backend" {
       spec {
         container {
           name              = "backend"
-          image             = var.backend_image
+          image             = local.backend_image
           image_pull_policy = "IfNotPresent"
 
           port {
@@ -617,7 +622,7 @@ resource "kubernetes_deployment_v1" "frontend" {
       spec {
         container {
           name              = "frontend"
-          image             = var.frontend_image
+          image             = local.frontend_image
           image_pull_policy = "IfNotPresent"
 
           port {

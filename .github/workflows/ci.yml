@@ -10,7 +10,7 @@ permissions:
 
 env:
   AWS_REGION: ${{ vars.AWS_REGION || 'eu-north-1' }}
-  EKS_CLUSTER_NAME: ${{ vars.EKS_CLUSTER_NAME || 'wms-lab' }}
+  EKS_CLUSTER_NAME: ${{ vars.EKS_CLUSTER_NAME || 'wms-eks' }}
   ECR_REPOSITORY: wms-backend
   K8S_NAMESPACE: wms
 
@@ -21,7 +21,7 @@ jobs:
 
     defaults:
       run:
-        working-directory: infra
+        working-directory: infra/terraform
 
     steps:
       - name: Checkout backend
@@ -35,11 +35,15 @@ jobs:
       - name: Check Terraform formatting
         run: terraform fmt -check -recursive
 
-      - name: Initialize Terraform
-        run: terraform init -backend=false
-
-      - name: Validate Terraform
-        run: terraform validate
+      - name: Validate every layer
+        shell: bash
+        run: |
+          for layer in bootstrap aws k8s; do
+            echo "::group::${layer}"
+            terraform -chdir="${layer}" init -backend=false -input=false
+            terraform -chdir="${layer}" validate
+            echo "::endgroup::"
+          done
 
   integration:
     name: Docker Compose and Cypress

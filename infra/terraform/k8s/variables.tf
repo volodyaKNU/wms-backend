@@ -1,15 +1,3 @@
-variable "kube_config_path" {
-  description = "Path to the kubeconfig used by the Kubernetes provider."
-  type        = string
-  default     = "~/.kube/config"
-}
-
-variable "kube_context" {
-  description = "Kubeconfig context where WMS resources are created."
-  type        = string
-  default     = "minikube"
-}
-
 variable "namespace" {
   description = "Kubernetes namespace for the WMS stack."
   type        = string
@@ -17,15 +5,17 @@ variable "namespace" {
 }
 
 variable "backend_image" {
-  description = "Container image used by the backend Deployment."
+  description = "Initial backend image. Null uses <ECR wms-backend>:latest. CI changes the tag afterwards."
   type        = string
-  default     = "wms-backend:local"
+  default     = null
+  nullable    = true
 }
 
 variable "frontend_image" {
-  description = "Container image used by the frontend Deployment."
+  description = "Initial frontend image. Null uses <ECR wms-frontend>:latest. CI changes the tag afterwards."
   type        = string
-  default     = "wms-frontend:local"
+  default     = null
+  nullable    = true
 }
 
 variable "postgres_image" {
@@ -61,26 +51,26 @@ variable "postgres_password" {
 variable "database_storage_size" {
   description = "Persistent volume size requested by PostgreSQL."
   type        = string
-  default     = "1Gi"
+  default     = "5Gi"
 }
 
 variable "create_gp3_storage_class" {
   description = "Create the AWS EBS CSI gp3 StorageClass used by the database PVC."
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "database_storage_class_name" {
   description = "StorageClass assigned to the database PVC. Null uses the cluster default."
   type        = string
-  default     = null
+  default     = "wms-gp3"
   nullable    = true
 }
 
 variable "frontend_service_type" {
   description = "Kubernetes Service type used to expose the frontend."
   type        = string
-  default     = "NodePort"
+  default     = "LoadBalancer"
 
   validation {
     condition     = contains(["NodePort", "LoadBalancer"], var.frontend_service_type)
@@ -89,14 +79,14 @@ variable "frontend_service_type" {
 }
 
 variable "frontend_load_balancer_source_ranges" {
-  description = "Optional CIDR ranges allowed to reach a LoadBalancer frontend."
+  description = "Optional CIDR ranges allowed to reach the frontend LoadBalancer. Null = public."
   type        = list(string)
   default     = null
   nullable    = true
 }
 
 variable "frontend_node_port" {
-  description = "NodePort used to expose the frontend from Minikube."
+  description = "NodePort of the frontend when frontend_service_type = NodePort."
   type        = number
   default     = 30080
 
@@ -107,7 +97,7 @@ variable "frontend_node_port" {
 }
 
 variable "prometheus_node_port" {
-  description = "NodePort used to expose the Prometheus UI from Minikube."
+  description = "NodePort of Prometheus when prometheus_service_type = NodePort."
   type        = number
   default     = 30091
 
@@ -120,7 +110,7 @@ variable "prometheus_node_port" {
 variable "prometheus_service_type" {
   description = "Kubernetes Service type used for Prometheus (LoadBalancer exposes the UI publicly)."
   type        = string
-  default     = "NodePort"
+  default     = "LoadBalancer"
 
   validation {
     condition     = contains(["ClusterIP", "NodePort", "LoadBalancer"], var.prometheus_service_type)
