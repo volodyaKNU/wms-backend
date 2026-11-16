@@ -1,4 +1,4 @@
-name: Backend CI and Docker
+name: Backend CI/CD
 
 on:
   push:
@@ -7,6 +7,12 @@ on:
 
 permissions:
   contents: read
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'eu-north-1' }}
+  EKS_CLUSTER_NAME: ${{ vars.EKS_CLUSTER_NAME || 'wms-lab' }}
+  ECR_REPOSITORY: wms-backend
+  K8S_NAMESPACE: wms
 
 jobs:
   terraform:
@@ -59,12 +65,22 @@ jobs:
           cache: npm
           cache-dependency-path: wms-frontend/package-lock.json
 
+      - name: Generate a throwaway database password
+        shell: bash
+        run: |
+          password="$(openssl rand -hex 24)"
+          echo "::add-mask::${password}"
+          echo "POSTGRES_PASSWORD=${password}" >> "$GITHUB_ENV"
+
       - name: Validate backend JavaScript
         working-directory: wms-backend
         run: npm ci && npm run lint
 
       - name: Build and start the complete stack
         run: docker compose -f wms-backend/infra/docker-compose.yml up -d --build --wait
+
+      - name: Check the Prometheus metrics endpoint
+        run: curl -fsS http://localhost:4000/metrics | grep -q '^wms_http_request_duration_seconds'
 
       - name: Install frontend dependencies
         working-directory: wms-frontend
@@ -91,32 +107,169 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write
+    env:
+      PUBLISH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
     steps:
       - name: Checkout backend
         uses: actions/checkout@v6
 
-      - name: Set lowercase image name
+      - name: Set lowercase GHCR image name
         id: image
         shell: bash
         run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
 
       - name: Log in to GHCR
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: env.PUBLISH == 'true'
         uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Uses OIDC when AWS_ROLE_ARN is set, otherwise the IAM access keys.
+      - name: Configure AWS credentials
+        if: env.PUBLISH == 'true'
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Log in to Amazon ECR
+        if: env.PUBLISH == 'true'
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Collect image tags
+        id: tags
+        shell: bash
+        env:
+          GHCR_IMAGE: ${{ steps.image.outputs.name }}
+          ECR_REGISTRY: ${{ steps.ecr.outputs.registry }}
+        run: |
+          {
+            echo "list<<EOF"
+            echo "${GHCR_IMAGE}:latest"
+            echo "${GHCR_IMAGE}:${GITHUB_SHA}"
+            if [ -n "${ECR_REGISTRY}" ]; then
+              echo "${ECR_REGISTRY}/${ECR_REPOSITORY}:latest"
+              echo "${ECR_REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}"
+            fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build and optionally publish backend image
         uses: docker/build-push-action@v7
         with:
           context: .
-          push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-          tags: |
-            ${{ steps.image.outputs.name }}:latest
-            ${{ steps.image.outputs.name }}:${{ github.sha }}
+          push: ${{ env.PUBLISH == 'true' }}
+          tags: ${{ steps.tags.outputs.list }}
+
+  deploy-eks:
+    name: Deploy backend to AWS EKS
+    needs: image
+    if: >-
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      vars.ENABLE_EKS_CD == 'true'
+    runs-on: ubuntu-latest
+    environment: aws-eks
+    concurrency:
+      group: eks-deploy-wms-backend
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Install kubectl matching the cluster version
+        shell: bash
+        run: |
+          minor="$(aws eks describe-cluster --name "$EKS_CLUSTER_NAME" --query cluster.version --output text)"
+          version="$(curl -fsSL "https://dl.k8s.io/release/stable-${minor}.txt")"
+          curl -fsSLo "$RUNNER_TEMP/kubectl" "https://dl.k8s.io/release/${version}/bin/linux/amd64/kubectl"
+          sudo install -m 0755 "$RUNNER_TEMP/kubectl" /usr/local/bin/kubectl
+          kubectl version --client
+
+      - name: Connect kubectl to EKS
+        run: aws eks update-kubeconfig --name "$EKS_CLUSTER_NAME" --region "$AWS_REGION"
+
+      - name: Sync the database Kubernetes Secret
+        id: sync_secret
+        shell: bash
+        env:
+          WMS_POSTGRES_PASSWORD: ${{ secrets.WMS_POSTGRES_PASSWORD }}
+        run: |
+          if [ -z "${WMS_POSTGRES_PASSWORD}" ]; then
+            echo "::error::GitHub secret WMS_POSTGRES_PASSWORD is not set."
+            exit 1
+          fi
+          # Keep the current value so a failed rollout can restore it.
+          kubectl get secret wms-db-secret --namespace "$K8S_NAMESPACE" --ignore-not-found \
+            -o jsonpath='{.data.POSTGRES_PASSWORD}' > "$RUNNER_TEMP/wms-db-secret.previous"
+          kubectl create secret generic wms-db-secret \
+            --namespace "$K8S_NAMESPACE" \
+            --from-literal=POSTGRES_PASSWORD="${WMS_POSTGRES_PASSWORD}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Update backend Deployment
+        id: set_image
+        shell: bash
+        run: |
+          account="$(aws sts get-caller-identity --query Account --output text)"
+          image="${account}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}:${GITHUB_SHA}"
+          kubectl set image deployment/wms-backend backend="${image}" --namespace "$K8S_NAMESPACE"
+          kubectl annotate deployment/wms-backend --namespace "$K8S_NAMESPACE" --overwrite \
+            kubernetes.io/change-cause="GitHub Actions ${GITHUB_SHA::12} (run ${GITHUB_RUN_ID})"
+
+      - name: Verify backend rollout
+        run: kubectl rollout status deployment/wms-backend --namespace "$K8S_NAMESPACE" --timeout=300s
+
+      - name: Check /metrics and the Prometheus scrape target
+        shell: bash
+        run: |
+          kubectl exec deployment/wms-backend --namespace "$K8S_NAMESPACE" -- \
+            wget -qO- http://127.0.0.1:4000/metrics | grep -m1 '^wms_http_request_duration_seconds'
+          for attempt in $(seq 1 12); do
+            targets="$(kubectl exec deployment/wms-prometheus --namespace "$K8S_NAMESPACE" -- \
+              wget -qO- 'http://127.0.0.1:9090/api/v1/targets?state=active')"
+            if echo "${targets}" | grep -q '"job":"wms-backend"' && \
+               echo "${targets}" | grep -q '"health":"up"'; then
+              echo "Prometheus scrapes wms-backend successfully."
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::Prometheus target wms-backend is not up."
+          echo "${targets}"
+          exit 1
+
+      - name: Restore the previous database Secret on failure
+        if: failure() && steps.sync_secret.outcome == 'success'
+        shell: bash
+        run: |
+          previous="$(cat "$RUNNER_TEMP/wms-db-secret.previous" 2>/dev/null || true)"
+          if [ -n "${previous}" ]; then
+            kubectl patch secret wms-db-secret --namespace "$K8S_NAMESPACE" \
+              --type merge -p "{\"data\":{\"POSTGRES_PASSWORD\":\"${previous}\"}}"
+          fi
+
+      - name: Roll back on failure
+        if: failure() && steps.set_image.outcome == 'success'
+        run: |
+          kubectl rollout undo deployment/wms-backend --namespace "$K8S_NAMESPACE" || true
+          kubectl get pods --namespace "$K8S_NAMESPACE" -o wide || true
 
   deploy:
     name: Update backend in Minikube

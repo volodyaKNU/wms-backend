@@ -32,9 +32,11 @@ GET /metrics
 ## Docker Compose
 
 Clone `wms-backend` and `wms-frontend` as sibling folders, then run from the
-parent folder:
+parent folder. The database password has no default and must come from the
+shell or an ignored `infra/.env` file (see `infra/.env.example`):
 
 ```bash
+export POSTGRES_PASSWORD="$(openssl rand -hex 24)"
 docker compose -f wms-backend/infra/docker-compose.yml up -d --build --wait
 ```
 
@@ -145,3 +147,48 @@ repository. Database credentials are never committed: `deploy.ps1` creates the
 `wms-db-secret` Kubernetes Secret from `WMS_POSTGRES_PASSWORD`, and Terraform
 accepts the same value through the sensitive `TF_VAR_postgres_password`
 variable.
+
+## Continuous deployment to AWS EKS
+
+Every push to `main` in `wms-backend` or `wms-frontend` runs the full pipeline:
+tests → image build → push to Amazon ECR (`<account>.dkr.ecr.eu-north-1.amazonaws.com/wms-<app>:<commit-sha>`,
+also mirrored to GHCR) → the `deploy-eks` job updates the Deployment in the
+`wms-lab` cluster.
+
+The `deploy-eks` job:
+
+1. authenticates to AWS and runs `aws eks update-kubeconfig`;
+2. (backend only) syncs the `wms-db-secret` Kubernetes Secret from the
+   `WMS_POSTGRES_PASSWORD` GitHub Actions secret;
+3. runs `kubectl set image` with the immutable commit-SHA tag and waits for
+   `kubectl rollout status`;
+4. verifies the release: the backend checks `/metrics` and that the Prometheus
+   `wms-backend` scrape target is `up`; the frontend checks the SPA and the
+   `/api` proxy;
+5. on any failure restores the previous Secret value and runs
+   `kubectl rollout undo`.
+
+Terraform ignores the container image of both Deployments
+(`lifecycle.ignore_changes`), so `terraform apply` never reverts a version
+rolled out by CI.
+
+### GitHub configuration
+
+| Kind | Name | Repositories | Purpose |
+|------|------|--------------|---------|
+| Secret | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | both | IAM user `wms-github-deployer` |
+| Secret | `WMS_POSTGRES_PASSWORD` | backend | value of the `wms-db-secret` Kubernetes Secret |
+| Secret | `AWS_ROLE_ARN` (optional) | both | use GitHub OIDC instead of access keys |
+| Variable | `ENABLE_EKS_CD=true` | both | enables the `deploy-eks` job |
+| Variable | `AWS_REGION`, `EKS_CLUSTER_NAME` (optional) | both | defaults: `eu-north-1`, `wms-lab` |
+
+The lab account's AWS Organizations SCP denies IAM OIDC providers, so GitHub
+OIDC cannot be used here and the pipeline falls back to access keys. The
+`wms-github-deployer` IAM user is limited to pushing the two WMS ECR
+repositories and `eks:DescribeCluster` on `wms-lab`. Inside Kubernetes its EKS
+access entry has `AmazonEKSEditPolicy` scoped to the `wms` namespace only.
+
+No credentials are stored in the repository: Docker Compose requires
+`POSTGRES_PASSWORD` (CI generates a throwaway one per run), Terraform takes
+`TF_VAR_postgres_password`, and production values live only in GitHub Actions
+secrets and the `wms-db-secret` Kubernetes Secret.

@@ -420,6 +420,12 @@ resource "kubernetes_deployment_v1" "backend" {
     }
   }
 
+  # GitHub Actions rolls out new image tags with `kubectl set image`.
+  # Terraform owns the rest of the Deployment and must not revert the tag.
+  lifecycle {
+    ignore_changes = [spec[0].template[0].spec[0].container[0].image]
+  }
+
   depends_on = [kubernetes_stateful_set_v1.database]
 }
 
@@ -675,6 +681,11 @@ resource "kubernetes_deployment_v1" "frontend" {
         }
       }
     }
+  }
+
+  # GitHub Actions rolls out new image tags with `kubectl set image`.
+  lifecycle {
+    ignore_changes = [spec[0].template[0].spec[0].container[0].image]
   }
 
   depends_on = [kubernetes_deployment_v1.backend]
