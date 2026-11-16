@@ -10,5 +10,6 @@ create_gp3_storage_class            = true
 database_storage_class_name         = "wms-gp3"
 database_storage_size               = "5Gi"
 frontend_service_type               = "LoadBalancer"
-frontend_load_balancer_source_ranges = ["YOUR_PUBLIC_IP/32"]
+# null = public (0.0.0.0/0); or restrict, e.g. ["YOUR_PUBLIC_IP/32"]
+frontend_load_balancer_source_ranges = null
 prometheus_service_type             = "ClusterIP"
